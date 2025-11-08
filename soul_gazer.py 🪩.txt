@@ -1,0 +1,110 @@
+import cv2
+import numpy as np
+import mediapipe as mp
+from deepface import DeepFace
+from skimage.transform import swirl
+
+# 🌀 Initialize MediaPipe Face Mesh
+mp_face_mesh = mp.solutions.face_mesh
+face_mesh = mp_face_mesh.FaceMesh(
+    static_image_mode=False,
+    max_num_faces=1,
+    refine_landmarks=True,
+    min_detection_confidence=0.5,
+    model_selection=1
+)
+
+# 🧠 Load precomputed average embeddings
+import json
+with open("avg_embeddings_facenet512.json", "r") as f:
+    avg_embeddings = json.load(f)
+male_avg = np.array(avg_embeddings["Facenet512"]["male"][500])
+female_avg = np.array(avg_embeddings["Facenet512"]["female"][500])
+
+def predict_gender(face_img):
+    try:
+        embedding_objs = DeepFace.represent(
+            img_path=face_img,
+            model_name="Facenet512",
+            detector_backend="mediapipe",
+            enforce_detection=True,
+            align=True
+        )
+        embedding = np.array(embedding_objs[0]["embedding"])
+        dist_to_male = np.linalg.norm(embedding - male_avg)
+        dist_to_female = np.linalg.norm(embedding - female_avg)
+        if dist_to_female < dist_to_male:
+            return "Female", dist_to_male, dist_to_female
+        else:
+            return "Male", dist_to_male, dist_to_female
+    except:
+        return "Unknown", 1.0, 1.0
+
+def create_3d_aura_overlay(frame, landmarks, male_prob, female_prob):
+    overlay = frame.copy()
+    h, w = frame.shape[:2]
+
+    jaw_indices = list(range(58, 287)) + [61, 291]
+    mouth_indices = [0, 13, 14, 17, 37, 39, 40, 61, 78, 80, 81, 82, 84, 87, 88, 91, 95, 146, 178, 181, 185, 191, 267, 269, 270, 291, 308, 310, 311, 312, 314, 317, 318, 321, 324, 336, 375, 402, 405, 409, 415]
+    left_eye_indices = [33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246]
+    right_eye_indices = [362, 382, 381, 380, 374, 373, 390, 249, 263, 466, 388, 387, 386, 385, 384, 398]
+
+    for idx, lm in enumerate(landmarks.landmark):
+        x, y = int(lm.x * w), int(lm.y * h)
+        z = lm.z * w
+        radius = max(2, int(4 - z / 10))
+        alpha = 0.4 + max(0, (0.6 - abs(z) / 50))
+
+        if x < w // 2:
+            color = (0, 0, int(255 * male_prob * alpha))
+        else:
+            color = (int(255 * female_prob * alpha), 0, 0)
+
+        cv2.circle(overlay, (x, y), radius, color, -1)
+
+        if idx in jaw_indices or idx in mouth_indices or idx in left_eye_indices or idx in right_eye_indices:
+            cv2.circle(overlay, (x, y), 2, (255, 255, 255), -1)
+
+    cv2.addWeighted(overlay, 0.5, frame, 0.5, 0, frame)
+    return frame
+
+# 📸 Main Loop
+cap = cv2.VideoCapture(0)
+print("👁️ 3D Gaze Active — Gender Reveal + Swirl. Press 'q' to exit.")
+
+while True:
+    ret, frame = cap.read()
+    if not ret: break
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    results = face_mesh.process(rgb)
+
+    if results.multi_face_landmarks:
+        for face_landmarks in results.multi_face_landmarks:
+            h, w = frame.shape[:2]
+            x_min = int(min([lm.x for lm in face_landmarks.landmark]) * w)
+            x_max = int(max([lm.x for lm in face_landmarks.landmark]) * w)
+            y_min = int(min([lm.y for lm in face_landmarks.landmark]) * h)
+            y_max = int(max([lm.y for lm in face_landmarks.landmark]) * h)
+            face_crop = frame[y_min:y_max, x_min:x_max]
+
+            label, male_dist, female_dist = predict_gender(face_crop)
+            total = male_dist + female_dist
+            male_prob = 1.0 - (male_dist / total)
+            female_prob = 1.0 - (female_dist / total)
+
+            frame = create_3d_aura_overlay(frame, face_landmarks, male_prob, female_prob)
+
+            cv2.putText(frame, f"{label} ({max(male_prob, female_prob):.2f})", 
+                        (x_min, y_min-10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
+
+    # Apply swirl effect centered on face
+    frame = swirl(frame, center=(w//2, h//2), strength=5, radius=200, preserve_range=True).astype(np.uint8)
+
+    cv2.imshow("Soul Gazer v1.3 — Alive", frame)
+    if cv2.waitKey(1) & 0xFF == ord('q'): break
+
+cap.release()
+cv2.destroyAllWindows()
+print("🌌 The lens breathes. The data remembers.")   
+
+
